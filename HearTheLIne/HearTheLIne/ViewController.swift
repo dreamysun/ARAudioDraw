@@ -11,6 +11,7 @@ import SceneKit
 import ARKit
 import Foundation
 import GLKit
+import AudioKit
 
 class ViewController: UIViewController, ARSCNViewDelegate {
     
@@ -18,8 +19,17 @@ class ViewController: UIViewController, ARSCNViewDelegate {
     var sessTool: Tool!
     var userIsDrawing = false
     var userIsMovingStructure = false
+    // + record
+    var recorder: AKNodeRecorder!
+    var player: AKPlayer!
+    var micMixer: AKMixer!
+    var micBooster: AKBooster!
+    var mainMixer: AKMixer!
+    var tape: AKAudioFile!
+    
     var bufferNode: SCNNode?
-    var selectionHolderNode: SCNNode?
+  //  var selectionHolderNode: SCNNode?
+    var lineNodes: [SCNNode]?
     var newPointBuffer: [SCNNode]?
     var oldOrientation: SCNQuaternion?
     var worldUp: SCNVector4 {
@@ -32,15 +42,53 @@ class ViewController: UIViewController, ARSCNViewDelegate {
     
     var recordicon = UIImage(named:"recordicon.png")
 
+    // + mic
+    let mic = AKMicrophone()
     
+    required init?(coder aDecoder: NSCoder) {
+        super.init(coder: aDecoder)
+        
+        AKAudioFile.cleanTempDirectory()
+        AKSettings.bufferLength = .medium
+        
+        do {
+            try AKSettings.setSession(category: .playAndRecord, with: .allowBluetoothA2DP)
+        } catch {
+            AKLog("Could not set session category.")
+        }
+        
+        AKSettings.defaultToSpeaker = true
+        
+        // Patching
+        let monoToStereo = AKStereoFieldLimiter(mic, amount: 1)
+        micMixer = AKMixer(monoToStereo)
+        micBooster = AKBooster(micMixer)
+        
+        // Will set the level of microphone monitoring
+        micBooster.gain = 0
+        recorder = try? AKNodeRecorder(node: micMixer)
+        if let file = recorder.audioFile {
+            player = AKPlayer(audioFile: file)
+        }
+        
+        mainMixer = AKMixer(player, micBooster)
+        
+        AudioKit.output = mainMixer
+        do {
+            try AudioKit.start()
+        } catch {
+            AKLog("AudioKit did not start!")
+        }
+    }
+
     @IBOutlet var sceneView: ARSCNView! {
         didSet {
             let holdRecognizer = UILongPressGestureRecognizer(target: self, action: #selector(reactToLongPress(byReactingTo:)))
             holdRecognizer.minimumPressDuration = CFTimeInterval(0.1)
             sceneView.addGestureRecognizer(holdRecognizer)
 
-            let singleTapRecognizer = UITapGestureRecognizer(target: self, action: #selector(reactToTap(byReactingTo:)))
-            sceneView.addGestureRecognizer(singleTapRecognizer)
+//            let singleTapRecognizer = UITapGestureRecognizer(target: self, action: #selector(reactToTap(byReactingTo:)))
+            //sceneView.addGestureRecognizer(singleTapRecognizer)
             
         }
     }
@@ -54,19 +102,50 @@ class ViewController: UIViewController, ARSCNViewDelegate {
             switch holdRecognizer.state {
             case .began:
                 userIsDrawing = true
+                // + record
+                if AKSettings.headPhonesPlugged {
+                    micBooster.gain = 1
+                }
+                do {
+                    try recorder.record()
+                } catch { AKLog("Errored recording.") }
+                
             case .ended:
                 userIsDrawing = false
+               // +record
+                lineNodes = newPointBuffer
+                
+                micBooster.gain = 0
+                tape = recorder.audioFile!
+                player.load(audioFile: tape)
+                
+                if let _ = player.audioFile?.duration {
+                    recorder.stop()
+                    tape.exportAsynchronously(
+                        name: "TempTestFile.m4a",
+                        baseDir: .documents,
+                        exportFormat: .m4a
+                    ) {
+                        _, exportError in
+                        if let error = exportError {
+                            AKLog("Export Failed \(error)")
+                        } else {
+                            AKLog("Export succeeded")
+                        }
+                    }
+                }
+                
             default: break
             }
-            
-        case .Manipulator:
-            switch holdRecognizer.state {
-            case .began:
-                userIsMovingStructure = true
-            case .ended:
-                userIsMovingStructure = false
+//
+//        case .Manipulator:
+//            switch holdRecognizer.state {
+//            case .began:
+//                userIsMovingStructure = true
+//            case .ended:
+//                userIsMovingStructure = false
             default: break
-            }
+            //}
         }
     }
     
@@ -127,7 +206,10 @@ class ViewController: UIViewController, ARSCNViewDelegate {
     
     private func positionNode(_ node: SCNNode, atDist dist: Float) {
         node.transform = (sceneView.pointOfView?.transform)!
-        var pointerVector = SCNVector3(-1 * node.transform.m31, -1 * node.transform.m32, -1 * node.transform.m33)
+       // var pointerVector = SCNVector3(-1 * node.transform.m31, -1 * node.transform.m32, -1 * node.transform.m33)
+        var pointerVector = SCNVector3(
+            -1 * node.transform.m31, -1 * node.transform.m32, -1 * node.transform.m33
+        )
         pointerVector.scaleBy(dist)
         node.position += pointerVector
     }
@@ -143,33 +225,36 @@ class ViewController: UIViewController, ARSCNViewDelegate {
     }
 */
     
-    @objc func reactToTap(byReactingTo singleTapRecognizer: UITapGestureRecognizer) {
-        switch sessTool.currentMode {
-        case .Manipulator:
-            let resultPoints = sceneView.hitTest(singleTapRecognizer.location(in: sceneView), options: nil)
-            if resultPoints.count > 0 {
-                let resultNode = resultPoints[0].node
-                if resultNode.isEqual(sessTool.toolNode) {
-                    return
-                }
-                
-                if let parentNode = resultNode.parent {
-                    if parentNode.isEqual(rootNode!) {
-                        sessTool.updateSelection(withSelectedNode: resultNode)
-                    } else {
-                        sessTool.updateSelection(withSelectedNode: parentNode)
-                    }
-                }
-            }
-        case .Pen:
-            break
-        }
-    }
+//    @objc func reactToTap(byReactingTo singleTapRecognizer: UITapGestureRecognizer) {
+//        switch sessTool.currentMode {
+//        case .Manipulator:
+//            let resultPoints = sceneView.hitTest(singleTapRecognizer.location(in: sceneView), options: nil)
+//            if resultPoints.count > 0 {
+//                let resultNode = resultPoints[0].node
+//                if resultNode.isEqual(sessTool.toolNode) {
+//                    return
+//                }
+//
+//                if let parentNode = resultNode.parent {
+//                    if parentNode.isEqual(rootNode!) {
+//                        sessTool.updateSelection(withSelectedNode: resultNode)
+//                    } else {
+//                        sessTool.updateSelection(withSelectedNode: parentNode)
+//                    }
+//                }
+//            }
+//        case .Pen:
+//            break
+//        }
+//    }
     
     func updateTool() {
-        
         let placeHolderNode = SCNNode()
         positionNode(placeHolderNode, atDist: sessTool.distanceFromCamera)
+       // sessTool.toolNode!.position = placeHolderNode.position
+//        sessTool.toolNode!.orientation = getSlerpOrientation(from: oldOrientation!, to: placeHolderNode.orientation)
+//
+      //  oldOrientation = sessTool.toolNode!.orientation
        
     }
     
@@ -180,15 +265,10 @@ class ViewController: UIViewController, ARSCNViewDelegate {
             if bufferNode == nil {
                 // user has started to draw a new line segment
                 bufferNode = SCNNode()
-                bufferNode!.geometry?.firstMaterial?.emission.contents = UIColor.green
                 rootNode?.addChildNode(bufferNode!)
                 newPointBuffer = []
             } else {
-                // user is currently drawing a line segment, place spheres at pointer position
-                let newNode = (SCNNode(geometry: SCNSphere(radius: sessTool.size * 1.5)))
-                newNode.geometry?.firstMaterial?.emission.contents = UIColor.green
-                newNode.geometry?.firstMaterial?.normal.contents = UIColor.blue
-                newNode.geometry?.firstMaterial?.metalness.contents = UIColor.green
+                let newNode = (SCNNode(geometry: SCNSphere(radius: sessTool.size)))
                 positionNode(newNode, atDist: sessTool.distanceFromCamera)
                 
                 newPointBuffer!.append(newNode)
@@ -230,69 +310,32 @@ class ViewController: UIViewController, ARSCNViewDelegate {
         }
     }
     
-    func updateMove() {
-        if userIsMovingStructure {
-            if selectionHolderNode == nil {
-                // user has started to move a selection
-                if sessTool.selection.isEmpty {
-                    return
-                }
-                
-             
-                
-                selectionHolderNode = SCNNode()
-                rootNode?.addChildNode(selectionHolderNode!)
-                
-                let selectionCentroid = calculateGlobalCentroid(Array(sessTool.selection))
-               
-                selectionHolderNode!.position = selectionCentroid
-                selectionHolderNode!.geometry = SCNSphere(radius: 0.05)
-                selectionHolderNode!.geometry?.firstMaterial?.diffuse.contents = UIColor.red
-                
-                
-                DispatchQueue.main.async {
-                    for parentNode in self.sessTool.selection {
-                        
-                        for childNode in parentNode.childNodes {
-                            let origTrans = childNode.worldTransform
-                            childNode.removeFromParentNode()
-                            self.selectionHolderNode!.addChildNode(childNode)
-                            childNode.setWorldTransform(origTrans)
-                        }
-                        parentNode.removeFromParentNode()
-                        self.sessTool.updateSelection(withSelectedNode: parentNode) // bad access
-                        
+    func updateListen() {
+        if !userIsDrawing {
+            if lineNodes != nil {
+                var shouldPlay = false
+                for point in lineNodes! {
+                    let pointPosition = point.presentation.worldPosition
+                    let pointPositionGLK = SCNVector3ToGLKVector3(pointPosition)
+                    let toolPosition = sessTool.toolNode!.presentation.worldPosition
+                    let toolPositionGLK = SCNVector3ToGLKVector3(toolPosition)
+                    let distance = GLKVector3Distance(pointPositionGLK, toolPositionGLK)
+                    if distance < 0.02 {
+                        shouldPlay = true
+                        break
                     }
-                    self.sessTool.updateSelection(withSelectedNode: self.selectionHolderNode!)
                 }
-            } else {
-                let positionTransformNode = SCNNode()
-                let origScale = selectionHolderNode!.scale
-                positionNode(positionTransformNode, atDist: sessTool.distanceFromCamera)
-                selectionHolderNode!.transform = positionTransformNode.transform
-                selectionHolderNode!.scale = origScale
-            }
-        } else {
-            if selectionHolderNode != nil {
-                // user has finished moving a selection
-                DispatchQueue.main.async {
-             
-                    
-                    if let newNode = self.selectionHolderNode?.clone() {
-                        newNode.geometry = nil
-                        self.rootNode!.replaceChildNode(self.selectionHolderNode!, with: newNode)
-                        self.sessTool.updateSelection(withSelectedNode: self.selectionHolderNode!)
-                        self.sessTool.updateSelection(withSelectedNode: newNode)
-                    }
-                    self.selectionHolderNode!.removeFromParentNode()
-                    self.selectionHolderNode = nil
-                  
+                if shouldPlay {
+                    player.isPaused ? player.resume() : player.play()
+                } else {
+                    if player.isPlaying { player.pause() }
                 }
             }
             
         }
     }
     
+                    
     private func calculateGlobalAverage(_ nodeList: [SCNNode]) -> SCNVector3 {
         // returns the average position of all nodes in nodeList
         var averagePos = SCNVector3()
@@ -343,8 +386,9 @@ class ViewController: UIViewController, ARSCNViewDelegate {
     
     func renderer(_ renderer: SCNSceneRenderer, willRenderScene scene: SCNScene, atTime time: TimeInterval) {
         updateDraw()
-        updateMove()
+       // updateMove()
         updateTool()
+        updateListen()
     }
     func session(_ session: ARSession, didFailWithError error: Error) {
         // Present an error message to the user

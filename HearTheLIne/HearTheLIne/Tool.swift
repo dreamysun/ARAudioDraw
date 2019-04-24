@@ -10,6 +10,7 @@
 import Foundation
 import CoreGraphics
 import SceneKit
+import AudioKit
 
 class Tool {
     
@@ -40,7 +41,8 @@ class Tool {
          Pinching should change the size of the pen
          */
         
-        case Manipulator
+//        case Manipulator
+        case Player
         /*
          The manipulator lets you reposition and resize nodes
          Tapping objects should add/remove them to current selection and change their color
@@ -79,19 +81,31 @@ class Tool {
                 recognizer.scale = 1
             default: break
             }
-        case .Manipulator:
-            switch recognizer.state {
-            case .began, .changed:
-                for parentNode in selection {
-                    parentNode.scale.scaleBy(Float(recognizer.scale))
-                    recognizer.scale = 1
-                }
-            default: break
-            }
+            // case .Manipulator:
+            //    switch recognizer.state {
+            //    case .began, .changed:
+            //        for parentNode in selection {
+            //            parentNode.scale.scaleBy(Float(recognizer.scale))
+            //            recognizer.scale = 1
+            //        }
+            //    default: break
+        //    }
+        default: break
         }
     }
     
     
- 
+    private func loadNodeFromFile(filename: String, directory: String) -> SCNNode {
+        if let scene = SCNScene(named: filename) {
+            let retNode = SCNNode()
+            scene.rootNode.childNodes.forEach({node in
+                retNode.addChildNode(node)
+            })
+            return retNode
+        } else {
+            print("Invalid path supplied")
+            return SCNNode()
+        }
+    }
     
 }
